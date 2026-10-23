@@ -164,7 +164,7 @@ export function GuideView({ team, guide, content, onSave, onOpen, nameOf }: Prop
                   setEditing(false);
                 }}
               >
-                {saving ? t('Encrypting and saving…') : t('Save the guidelines')}
+                {saving ? t('Saving…') : t('Save the guidelines')}
               </button>
               <button
                 type="button"

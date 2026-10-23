@@ -84,7 +84,7 @@ interface Props {
 }
 
 type Panel = 'tiers' | 'measures' | 'notes' | 'tags' | 'threads' | 'agreement';
-type SaveState = 'saved' | 'saving' | 'error';
+type SaveState = 'saved' | 'pending' | 'saving' | 'error';
 
 const isTier = (d: AnnotationDoc): d is AnnotationDoc<Tier> => d.row.kind === 'tier';
 const isSketch = (d: AnnotationDoc): d is AnnotationDoc<Sketch> => d.row.kind === 'sketch';
@@ -216,7 +216,7 @@ export function Editor({ identity, team, recording: initialRecording, onClose, t
           const row = await saveAnnotation(team, doc);
           setDocs((cur) => cur.map((d) => (d.row.id === id ? { ...d, row: { ...d.row, updated_at: row.updated_at, payload_enc: row.payload_enc } } : d)));
         }
-        if (saveTimers.current.size === 0) setSaveState('saved');
+        setSaveState(saveTimers.current.size === 0 ? 'saved' : 'pending');
         setSaveError(null);
       } catch (e) {
         setSaveState('error');
@@ -231,7 +231,7 @@ export function Editor({ identity, team, recording: initialRecording, onClose, t
       const timers = saveTimers.current;
       const prev = timers.get(id);
       if (prev) window.clearTimeout(prev);
-      setSaveState('saving');
+      setSaveState((s) => (s === 'saving' ? s : 'pending'));
       timers.set(id, window.setTimeout(() => void flushSave(id), delay));
     },
     [flushSave],
@@ -807,7 +807,7 @@ export function Editor({ identity, team, recording: initialRecording, onClose, t
         </button>
         <h1 className="editor-title">{recording.meta.name}</h1>
         <span className={`save-state ${saveState}`} role="status">
-          {saveState === 'saving' ? t('Encrypting and saving…') : saveState === 'error' ? t('Not saved') : t('All changes saved')}
+          {saveState === 'saving' ? t('Saving…') : saveState === 'pending' ? t('Unsaved changes') : saveState === 'error' ? t('Not saved') : t('All changes saved')}
         </span>
       </header>
 

@@ -111,7 +111,7 @@ function loadAuth(): GitHubTokens | null {
 
 export class GitHubBackend implements Backend {
   readonly kind = 'github' as const;
-  readonly saveDelayMs = 4000;
+  readonly saveDelayMs = 2500;
 
   private auth: GitHubTokens | null = loadAuth();
   private refreshing: Promise<void> | null = null;
@@ -120,6 +120,8 @@ export class GitHubBackend implements Backend {
   private profileCache: StoredProfile | null = null;
   private repos = new Map<string, RepoRef>(); // teamId → repository
   private trees = new Map<string, { at: number; entries: Map<string, TreeEntry> }>();
+  // Commits to one branch must not overlap, or GitHub rejects all but one of them.
+  private writing = new Map<string, Promise<unknown>>();
   private teamKeys = new Map<string, CryptoKey>();
   private privateKey: CryptoKey | null = null;
   private publicKey: JsonWebKey | null = null;
@@ -356,10 +358,11 @@ export class GitHubBackend implements Backend {
     return r;
   }
 
-  private async tree(r: RepoRef, fresh = false): Promise<Map<string, TreeEntry>> {
+  /** The repository's file list; `maxAge` is how old a cached copy may be, in ms. */
+  private async tree(r: RepoRef, fresh = false, maxAge = 4000): Promise<Map<string, TreeEntry>> {
     const key = `${r.owner}/${r.repo}`;
     const cached = this.trees.get(key);
-    if (cached && !fresh && Date.now() - cached.at < 4000) return cached.entries;
+    if (cached && !fresh && Date.now() - cached.at < maxAge) return cached.entries;
     const data = await this.req<{ tree: TreeEntry[] }>('GET', `/repos/${key}/git/trees/${encodeURIComponent(r.branch)}?recursive=1`);
     const entries = new Map(data.tree.filter((e) => e.type === 'blob').map((e) => [e.path, e]));
     this.trees.set(key, { at: Date.now(), entries });
@@ -386,10 +389,19 @@ export class GitHubBackend implements Backend {
     return Promise.all(entries.map(async (e) => JSON.parse(await this.blobText(r, e.sha)) as T));
   }
 
-  private async writeFile(r: RepoRef, path: string, contentB64: string): Promise<void> {
+  private writeFile(r: RepoRef, path: string, contentB64: string): Promise<void> {
+    const key = `${r.owner}/${r.repo}`;
+    const next = (this.writing.get(key) ?? Promise.resolve()).catch(() => {}).then(() => this.commitFile(r, path, contentB64));
+    this.writing.set(key, next);
+    return next;
+  }
+
+  private async commitFile(r: RepoRef, path: string, contentB64: string): Promise<void> {
     const key = `${r.owner}/${r.repo}`;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const sha = (await this.tree(r, attempt > 0)).get(path)?.sha;
+      // Our own commits keep the cached list current, so it is trusted for a
+      // few minutes; a conflict means someone else wrote, and forces a refresh.
+      const sha = (await this.tree(r, attempt > 0, 5 * 60_000)).get(path)?.sha;
       try {
         const res = await this.req<{ content: { sha: string } }>('PUT', `/repos/${key}/contents/${path}`, {
           message: COMMIT_MESSAGE,
@@ -410,12 +422,16 @@ export class GitHubBackend implements Backend {
     await this.writeFile(r, path, b64json(value));
   }
 
-  private async deleteFile(r: RepoRef, path: string) {
+  private deleteFile(r: RepoRef, path: string): Promise<void> {
     const key = `${r.owner}/${r.repo}`;
-    const sha = (await this.tree(r, true)).get(path)?.sha;
-    if (!sha) return;
-    await this.req('DELETE', `/repos/${key}/contents/${path}`, { message: COMMIT_MESSAGE, sha, branch: r.branch });
-    this.trees.get(key)?.entries.delete(path);
+    const next = (this.writing.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const sha = (await this.tree(r, true)).get(path)?.sha;
+      if (!sha) return;
+      await this.req('DELETE', `/repos/${key}/contents/${path}`, { message: COMMIT_MESSAGE, sha, branch: r.branch });
+      this.trees.get(key)?.entries.delete(path);
+    });
+    this.writing.set(key, next);
+    return next;
   }
 
   private async openRepo(fullName: string): Promise<RepoRef> {
@@ -723,11 +739,18 @@ export class GitHubBackend implements Backend {
     const me = this.me().id;
     const r = this.repoOf(row.team_id);
     const path = this.annotationPath(row);
-    const existing = await this.readJSON<StoredAnnotation>(r, path);
+    // A cached file list is enough here: blobs are cached by content, so these
+    // reads cost no request unless a colleague changed the file meanwhile.
+    const entries = await this.tree(r, false, 60_000);
+    const read = async <T,>(p: string) => {
+      const e = entries.get(p);
+      return e ? (JSON.parse(await this.blobText(r, e.sha)) as T) : null;
+    };
+    const existing = await read<StoredAnnotation>(path);
     if (existing && existing.author_id !== me && !SHARED_KINDS.includes(existing.kind)) {
       throw new Error('You can only edit your own annotations.');
     }
-    const recording = row.recording_id ? await this.readJSON<RecordingRow>(r, `recordings/${row.recording_id}.json`) : null;
+    const recording = row.recording_id ? await read<RecordingRow>(`recordings/${row.recording_id}.json`) : null;
     const full: AnnotationRow = { ...row, updated_by: me };
     await this.writeJSON(r, path, this.mayReveal(full, recording) ? full : await this.seal(full));
   }

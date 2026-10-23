@@ -151,7 +151,7 @@ export function TeamView({ identity, team, onChanged, onOpen, onGuide }: Props) 
                 }}
               />
               <button type="button" className="btn primary" onClick={() => fileInput.current?.click()} disabled={!!uploading}>
-                {uploading ? t('Encrypting {name}…', { name: uploading }) : t('Upload audio')}
+                {uploading ? t('Uploading {name}…', { name: uploading }) : t('Upload audio')}
               </button>
             </div>
           )}
