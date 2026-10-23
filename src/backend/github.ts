@@ -431,21 +431,30 @@ export class GitHubBackend implements Backend {
     if (!profile) return [];
     const out: { team: TeamRow; membership: MemberRow }[] = [];
     const keep: string[] = [];
-    for (const full of profile.teams) {
+    // An invitation accepted on GitHub (from the e-mail, say) never reaches
+    // Annotino, so team repositories you can already reach are picked up here.
+    const known = new Set(profile.teams);
+    const found = await this.req<{ full_name: string; name: string }[]>('GET', '/user/repos?affiliation=collaborator,organization_member&per_page=100').catch(
+      () => [],
+    );
+    const candidates = [...profile.teams, ...found.filter((x) => x.name.startsWith('annotino-team-') && !known.has(x.full_name)).map((x) => x.full_name)];
+    for (const full of candidates) {
+      const discovered = !known.has(full);
       try {
         const r = await this.openRepo(full);
         const team = await this.readJSON<TeamRow>(r, 'annotino.json');
         const member = await this.readJSON<StoredMember>(r, `members/${me.id}.json`);
+        if (discovered && (!team || !member)) continue;
         keep.push(full);
         if (!team || !member) continue;
         this.repos.set(team.id, r);
         out.push({ team, membership: member });
       } catch (e) {
         // A repository that was deleted or that we lost access to is dropped from the list.
-        if (!(e instanceof GitHubError && e.status === 404)) keep.push(full);
+        if (!discovered && !(e instanceof GitHubError && e.status === 404)) keep.push(full);
       }
     }
-    if (keep.length !== profile.teams.length) await this.writeProfile({ ...profile, teams: keep });
+    if (keep.length !== profile.teams.length || keep.some((x) => !known.has(x))) await this.writeProfile({ ...profile, teams: keep });
     return out.sort((a, b) => a.team.created_at.localeCompare(b.team.created_at));
   }
 
