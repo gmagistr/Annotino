@@ -98,8 +98,8 @@ Limiti specifici di GitHub:
 - **Metadati.** GitHub e i collaboratori vedono nomi dei file, dimensioni e orari dei commit;
   il contenuto resta cifrato. GitHub non è un fornitore UE: valuta con il tuo ateneo se i dati
   cifrati possono stare lì.
-- **Limiti di spazio.** GitHub consiglia repository sotto 1 GB e accetta file fino a 100 MB
-  (Annotino si ferma a 50 MB per file).
+- **Limiti di spazio.** GitHub consiglia repository sotto 1 GB. Annotino accetta registrazioni
+  fino a 100 MB e le salva in parti da 8 MB, perché GitHub rifiuta i file grandi inviati in una volta.
 - **Chiave pubblica.** Al primo accesso Annotino pubblica un gist con la tua chiave pubblica,
   così gli amministratori possono aggiungerti per nome utente, e salva in un gist segreto la tua
   chiave privata cifrata con la password e l'elenco dei tuoi team.

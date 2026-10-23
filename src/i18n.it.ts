@@ -326,8 +326,8 @@ export const IT: Record<string, string> = {
   'updated {when}': 'aggiornato il {when}',
   you: 'tu',
   '{name} can now open this team.': '{name} ora può aprire questo team.',
-  '{name} is larger than 50 MB. Split the recording or convert it to FLAC.':
-    '{name} supera i 50 MB. Dividi la registrazione o convertila in FLAC.',
+  '{name} is larger than {mb} MB. Split the recording or convert it to FLAC.':
+    '{name} supera i {mb} MB. Dividi la registrazione o convertila in FLAC.',
   '{n} syll/s': '{n} sill/s',
   'α and κ are computed on {n} time frames; F1 counts boundaries placed within the tolerance of each other.':
     'α e κ sono calcolati su {n} frame temporali; l’F1 conta i confini posti entro la tolleranza l’uno dall’altro.',

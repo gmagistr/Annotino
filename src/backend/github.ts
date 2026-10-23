@@ -7,7 +7,8 @@
  *   annotino.json                         the team row (name encrypted)
  *   members/<userId>.json                 role, team key wrapped for that member, public key
  *   recordings/<recordingId>.json         the recording row (metadata encrypted)
- *   audio/<random>.bin                    the encrypted audio
+ *   audio/<random>.bin.part<n>            the encrypted audio, in 8 MB parts
+ *                                         (audio/<random>.bin whole, in older teams)
  *   annotations/<recordingId|team>/<id>.json   annotation rows
  *
  * The user's own key pair lives in two gists: a secret one with the
@@ -49,6 +50,8 @@ const PROFILE_FILE = 'annotino-profile.json';
 const PUBLIC_GIST = 'Annotino public key';
 const PUBLIC_FILE = 'annotino-public-key.json';
 const COMMIT_MESSAGE = 'Annotino update';
+/** Bytes of encrypted audio per file in the repository. */
+const AUDIO_PART = 8 * 1024 * 1024;
 
 class GitHubError extends Error {
   constructor(
@@ -613,17 +616,86 @@ export class GitHubBackend implements Backend {
     return `audio/${row.storage_path.split('/').pop()}.bin`;
   }
 
+  /**
+   * The audio goes up in parts of AUDIO_PART bytes, because GitHub refuses
+   * large files sent in one request. The parts and the recording's entry are
+   * then added in a single commit.
+   */
   async createRecording(row: RecordingRow, encryptedAudio: Uint8Array<ArrayBuffer>) {
     const r = this.repoOf(row.team_id);
-    await this.writeFile(r, this.audioPath(row), toB64(encryptedAudio));
-    await this.writeJSON(r, `recordings/${row.id}.json`, row);
+    const files: { path: string; sha: string }[] = [];
+    const base = this.audioPath(row);
+    for (let i = 0, n = 0; i < encryptedAudio.length; i += AUDIO_PART, n++) {
+      files.push({ path: `${base}.part${n}`, sha: await this.blob(r, toB64(encryptedAudio.subarray(i, i + AUDIO_PART))) });
+    }
+    files.push({ path: `recordings/${row.id}.json`, sha: await this.blob(r, b64json(row)) });
+    await this.commitBlobs(r, files);
+  }
+
+  private async blob(r: RepoRef, contentB64: string): Promise<string> {
+    const res = await this.req<{ sha: string }>('POST', `/repos/${r.owner}/${r.repo}/git/blobs`, { content: contentB64, encoding: 'base64' });
+    return res.sha;
+  }
+
+  /** One commit that adds or replaces several files already uploaded as blobs. */
+  private commitBlobs(r: RepoRef, files: { path: string; sha: string }[]): Promise<void> {
+    const key = `${r.owner}/${r.repo}`;
+    const run = async () => {
+      for (let attempt = 0; ; attempt++) {
+        const ref = await this.req<{ object: { sha: string } }>('GET', `/repos/${key}/git/ref/heads/${encodeURIComponent(r.branch)}`);
+        const parent = await this.req<{ tree: { sha: string } }>('GET', `/repos/${key}/git/commits/${ref.object.sha}`);
+        const tree = await this.req<{ sha: string }>('POST', `/repos/${key}/git/trees`, {
+          base_tree: parent.tree.sha,
+          tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', sha: f.sha })),
+        });
+        const commit = await this.req<{ sha: string }>('POST', `/repos/${key}/git/commits`, {
+          message: COMMIT_MESSAGE,
+          tree: tree.sha,
+          parents: [ref.object.sha],
+        });
+        try {
+          await this.req('PATCH', `/repos/${key}/git/refs/heads/${encodeURIComponent(r.branch)}`, { sha: commit.sha });
+        } catch (e) {
+          // 422: someone committed meanwhile; build the commit again on top of theirs.
+          if (e instanceof GitHubError && e.status === 422 && attempt < 2) continue;
+          throw e;
+        }
+        const cached = this.trees.get(key);
+        for (const f of files) cached?.entries.set(f.path, { path: f.path, sha: f.sha, type: 'blob' });
+        return;
+      }
+    };
+    const next = (this.writing.get(key) ?? Promise.resolve()).catch(() => {}).then(run);
+    this.writing.set(key, next);
+    return next;
+  }
+
+  /** The audio's files: one for recordings stored whole, otherwise its parts in order. */
+  private audioFiles(entries: Map<string, TreeEntry>, row: RecordingRow): TreeEntry[] {
+    const base = this.audioPath(row);
+    const whole = entries.get(base);
+    if (whole) return [whole];
+    const parts: TreeEntry[] = [];
+    for (let n = 0; entries.has(`${base}.part${n}`); n++) parts.push(entries.get(`${base}.part${n}`)!);
+    return parts;
   }
 
   async downloadAudio(row: RecordingRow): Promise<ArrayBuffer> {
     const r = this.repoOf(row.team_id);
-    const e = (await this.tree(r)).get(this.audioPath(row));
-    if (!e) throw new Error('Audio file not found.');
-    return this.req<ArrayBuffer>('GET', `/repos/${r.owner}/${r.repo}/git/blobs/${e.sha}`, undefined, 'application/vnd.github.raw');
+    let files = this.audioFiles(await this.tree(r), row);
+    if (!files.length) files = this.audioFiles(await this.tree(r, true), row);
+    if (!files.length) throw new Error('Audio file not found.');
+    const parts = await Promise.all(
+      files.map((e) => this.req<ArrayBuffer>('GET', `/repos/${r.owner}/${r.repo}/git/blobs/${e.sha}`, undefined, 'application/vnd.github.raw')),
+    );
+    if (parts.length === 1) return parts[0];
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+    let at = 0;
+    for (const p of parts) {
+      out.set(new Uint8Array(p), at);
+      at += p.byteLength;
+    }
+    return out.buffer;
   }
 
   async updateRecording(id: string, patch: Partial<Pick<RecordingRow, 'meta_enc' | 'blind_revealed'>>) {
@@ -638,7 +710,7 @@ export class GitHubBackend implements Backend {
     for (const e of [...(await this.tree(r, true)).values()].filter((x) => x.path.startsWith(`annotations/${row.id}/`))) {
       await this.deleteFile(r, e.path);
     }
-    await this.deleteFile(r, this.audioPath(row));
+    for (const e of this.audioFiles(await this.tree(r, true), row)) await this.deleteFile(r, e.path);
     await this.deleteFile(r, `recordings/${row.id}.json`);
   }
 

@@ -72,8 +72,10 @@ export function TeamView({ identity, team, onChanged, onOpen, onGuide }: Props) 
   const upload = async (files: FileList | null) => {
     if (!files) return;
     for (const file of Array.from(files)) {
-      if (file.size > 50 * 1024 * 1024) {
-        setError(t('{name} is larger than 50 MB. Split the recording or convert it to FLAC.', { name: file.name }));
+      // GitHub stores the audio in parts; Supabase's free plan stops at 50 MB a file.
+      const maxMb = backend.kind === 'github' ? 100 : 50;
+      if (file.size > maxMb * 1024 * 1024) {
+        setError(t('{name} is larger than {mb} MB. Split the recording or convert it to FLAC.', { name: file.name, mb: maxMb }));
         continue;
       }
       setUploading(file.name);
