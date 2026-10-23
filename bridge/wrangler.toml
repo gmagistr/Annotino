@@ -1,0 +1,15 @@
+name = "annotino-bridge"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# Logs off: the worker handles access tokens and must not keep them anywhere.
+[observability]
+enabled = false
+
+[vars]
+# The address of your Annotino page (no trailing slash). Several: comma-separated.
+ALLOWED_ORIGINS = "https://gmagistr.github.io,http://localhost:5173"
+
+# GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET are set as secrets:
+#   npx wrangler secret put GITHUB_CLIENT_ID
+#   npx wrangler secret put GITHUB_CLIENT_SECRET
